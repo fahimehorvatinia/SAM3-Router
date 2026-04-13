@@ -61,16 +61,22 @@ SAM3 ViT backbone  ← runs ONCE per image
 
 ## Dataset
 
-Uses the **SA-Co metaclip** dataset with 3 independent test folds:
+Uses the **SA-Co metaclip** dataset (`saco_gold_metaclip_test_1.json` — 6172 positives, 27221 negatives).
 
-| Fold | Role | Positives | Negatives |
-|------|------|-----------|-----------|
-| `saco_gold_metaclip_test_1.json` | Router training data | ~6172 | ~27221 |
-| `saco_gold_metaclip_test_2.json` | Validation | ~6182 | ~27211 |
-| `saco_gold_metaclip_test_3.json` | Final test (held-out) | ~6252 | ~27141 |
+**70 / 20 / 10 split** applied to the 1500 oracle-labelled samples collected from `test_1`:
 
-**Positive**: image contains the queried concept, GT segmentation mask available.
-**Negative**: concept is absent from the image, no annotation.
+| Split | Size | Role |
+|-------|------|------|
+| **70% Train** | 1050 samples | Router training (oracle labels → KL + CE loss) |
+| **20% Val** | 300 samples | Validation loss during training (early stopping) |
+| **10% Test** | 150 positives + 500 test_3 negatives | Final held-out evaluation — IL_MCC primary metric |
+
+Split indices are saved deterministically in `results/router_training_data/meta.json` (key `"splits"`).
+
+**Positive**: image contains the queried concept, GT segmentation mask available.  
+**Negative**: concept is absent from the image, no annotation — required for IL_MCC.
+
+> Negatives for the final eval come from `saco_gold_metaclip_test_3.json`, which is never used during training or validation.
 
 ---
 
@@ -134,25 +140,28 @@ tail -f results/pipeline_run.log
 
 This runs three steps automatically:
 
-**Step 1 — Collect oracle layer data**
+**Step 1 — Collect oracle layer data** *(70/20/10 split written to meta.json)*
 ```bash
 python experiments/collect_oracle_layers.py
 # Sweeps layers 17-32 on 1500 SA-Co test_1 positives
 # Saves: results/router_training_data/{text_embs.npy, cgf1_matrix.npy, meta.json}
+# meta.json includes splits: {"train": [...], "val": [...], "test": [...]}
 ```
 
-**Step 2 — Train the router**
+**Step 2 — Train the router** *(uses 70% train / 20% val from meta.json)*
 ```bash
 python experiments/train_router.py
 # 150 epochs, KL divergence + cross-entropy loss
+# Train on 70% split, val loss on 20% split, 10% test reserved
 # Saves: results/capr_router_weights.pt, results/router_training_curve.png
 ```
 
-**Step 3 — Evaluate on test_3 (IL_MCC)**
+**Step 3 — Evaluate on 10% test split + test_3 negatives (IL_MCC)**
 ```bash
 python experiments/eval_router_full.py
-# 500 pos + 500 neg from SA-Co test_3 (never seen during training)
-# Saves: results/eval_full_summary.png, results/eval_full_raw.csv
+# Positives: 10% oracle test split (150 samples, pre-computed labels)
+# Negatives: 500 from saco_gold_metaclip_test_3.json (held-out, never used in training)
+# Saves: results/eval_full_summary.png, results/eval_full_raw.csv, results/eval_full_layer_dist.png
 ```
 
 ### Hypothesis verification
