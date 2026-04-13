@@ -133,10 +133,25 @@ def collect(samples, wrapper):
 
 # ── Save ──────────────────────────────────────────────────────────────────────
 def save(text_embs, cgf1_matrix, meta):
+    N = len(meta)
+    # 70 / 20 / 10 split — deterministic, based on index order (already shuffled)
+    n_train = int(N * 0.70)
+    n_val   = int(N * 0.20)
+    # n_test  = N - n_train - n_val  (remaining 10%)
+    splits = dict(
+        train = list(range(0,              n_train)),
+        val   = list(range(n_train,        n_train + n_val)),
+        test  = list(range(n_train + n_val, N)),
+    )
+
     np.save(os.path.join(OUT_DIR, "text_embs.npy"),   text_embs)
     np.save(os.path.join(OUT_DIR, "cgf1_matrix.npy"), cgf1_matrix)
     with open(os.path.join(OUT_DIR, "meta.json"), "w") as f:
-        json.dump({"layer_list": TRAIN_LAYERS, "samples": meta}, f, indent=2)
+        json.dump({"layer_list": TRAIN_LAYERS, "samples": meta,
+                   "splits": splits}, f, indent=2)
+
+    print(f"  70/20/10 split: {len(splits['train'])} train  "
+          f"{len(splits['val'])} val  {len(splits['test'])} test")
 
     print(f"\nSaved to {OUT_DIR}/")
     print(f"  text_embs.npy    : {text_embs.shape}")

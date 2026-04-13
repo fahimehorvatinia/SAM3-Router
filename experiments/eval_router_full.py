@@ -52,51 +52,109 @@ from capr_router import load_router
 from metrics import compute_cgf1, compute_iou, merge_gt_masks
 
 # ── Config ────────────────────────────────────────────────────────────────────
-# test_3 = held-out split (never used in training or validation)
+# The 10% test split comes from the collected oracle data (meta.json splits.test).
+# These positives already HAVE oracle labels (cgF1 per layer) from the collection.
+# For negatives (needed for IL_MCC), sample from test_3 which was never used.
 TEST_FILE  = ("/home/grads/f/fahimehorvatinia/Documents/newpaper_2026"
               "/saco_gold_data/metaclip/saco_gold_metaclip_test_3.json")
+DATA_DIR_EVAL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "results", "router_training_data")
 IMAGE_ROOT = "/home/grads/f/fahimehorvatinia/Documents/newpaper_2026/metaclip-images"
 OUT_DIR    = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 TRAIN_LAYERS  = list(range(17, 33))   # must match collect step
-N_POS         = 500     # positives from test_3 for evaluation
-N_NEG         = 500     # negatives from test_3 for evaluation
-N_ORACLE_POS  = 100     # positives for oracle sweep (rest skip oracle; too slow)
+N_NEG         = 500     # negatives from test_3 for IL_MCC
+N_ORACLE_POS  = 100     # positives for oracle sweep if no pre-computed labels
 THRESHOLD     = 0.5     # fixed query-score threshold for presence detection
 SEED          = 77      # different from train (42) and val seeds
 
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 def load_eval_samples():
+    """
+    Positives: the 10% test split from collected oracle data (meta.json splits.test).
+    These already have oracle cgF1 labels from the collection step.
+
+    Negatives: random sample from test_3 (never used in training).
+    Needed for IL_MCC (requires both classes).
+    """
+    # ── Positives from 10% oracle test split ─────────────────────────────────
+    text_embs   = np.load(os.path.join(DATA_DIR_EVAL, "text_embs.npy"))
+    cgf1_matrix = np.load(os.path.join(DATA_DIR_EVAL, "cgf1_matrix.npy"))
+    with open(os.path.join(DATA_DIR_EVAL, "meta.json")) as f:
+        meta = json.load(f)
+    layer_list  = meta["layer_list"]
+    splits      = meta.get("splits", {})
+    test_idx    = splits.get("test", list(range(int(len(meta["samples"]) * 0.90),
+                                               len(meta["samples"]))))
+    test_samples = [meta["samples"][i] for i in test_idx]
+    test_embs    = text_embs[test_idx]
+    test_cgf1    = cgf1_matrix[test_idx]
+
+    positives = []
+    for i, s in enumerate(test_samples):
+        positives.append(dict(
+            image_id=s["image_id"], image_path=s["image_path"] if "image_path" in s
+                     else os.path.join(IMAGE_ROOT, ""),
+            prompt=s["prompt"], is_present=True,
+            text_emb=test_embs[i],
+            oracle_cgf1=test_cgf1[i].tolist(),   # pre-computed per layer
+        ))
+
+    # We still need the image path — look it up from test_3 or test_1
+    # (meta.json might not store image paths in all versions)
+    # Load from TEST_FILE to get paths for positives
     with open(TEST_FILE) as f:
-        data = json.load(f)
+        data3 = json.load(f)
+    id_to_img3 = {i["id"]: i for i in data3["images"]}
 
-    anno_map = defaultdict(list)
-    for a in data["annotations"]:
-        anno_map[a["image_id"]].append(a)
+    # ── Negatives from test_3 (completely held-out) ───────────────────────────
+    anno_map3 = defaultdict(list)
+    for a in data3["annotations"]:
+        anno_map3[a["image_id"]].append(a)
 
-    pos_pool, neg_pool = [], []
-    for img in data["images"]:
+    neg_pool = []
+    for img in data3["images"]:
+        if anno_map3.get(img["id"]):
+            continue
         path = os.path.join(IMAGE_ROOT, img["file_name"])
         if not os.path.exists(path):
             continue
-        annos = anno_map.get(img["id"], [])
-        entry = dict(image_id=img["id"], image_path=path, prompt=img["text_input"],
-                     height=img["height"], width=img["width"],
-                     annotations=annos, is_present=bool(annos))
-        if annos:
-            pos_pool.append(entry)
-        else:
-            neg_pool.append(entry)
+        neg_pool.append(dict(image_id=img["id"], image_path=path, prompt=img["text_input"],
+                             height=img["height"], width=img["width"],
+                             annotations=[], is_present=False,
+                             text_emb=None, oracle_cgf1=None))
 
     random.seed(SEED)
-    positives = random.sample(pos_pool, min(N_POS, len(pos_pool)))
     negatives = random.sample(neg_pool, min(N_NEG, len(neg_pool)))
 
-    print(f"test_3  positives available: {len(pos_pool):6d}  sampled: {len(positives)}")
-    print(f"test_3  negatives available: {len(neg_pool):6d}  sampled: {len(negatives)}")
-    return positives, negatives
+    # Also load SA-Co test_1 image paths for the oracle-labelled positives
+    # (needed for actual inference; re-use from collect_oracle_layers output)
+    with open(("/home/grads/f/fahimehorvatinia/Documents/newpaper_2026"
+               "/saco_gold_data/metaclip/saco_gold_metaclip_test_1.json")) as f:
+        data1 = json.load(f)
+    id_to_img1 = {i["id"]: i for i in data1["images"]}
+    anno_map1  = defaultdict(list)
+    for a in data1["annotations"]:
+        anno_map1[a["image_id"]].append(a)
+
+    for pos in positives:
+        iid = pos["image_id"]
+        if iid in id_to_img1:
+            img_meta = id_to_img1[iid]
+            pos["image_path"] = os.path.join(IMAGE_ROOT, img_meta["file_name"])
+            pos["height"]     = img_meta["height"]
+            pos["width"]      = img_meta["width"]
+            pos["annotations"] = anno_map1.get(iid, [])
+
+    # Filter positives with valid paths
+    positives = [p for p in positives if os.path.exists(p.get("image_path", ""))]
+
+    print(f"10% oracle test split: {len(positives)} positives  (pre-computed oracle labels)")
+    print(f"test_3 negatives:      {len(negatives)} sampled")
+    print(f"Layer list: {layer_list}")
+    return positives, negatives, layer_list
 
 
 def load_gt(sample):
@@ -359,11 +417,12 @@ def main():
     print(f"Primary metric: IL_MCC")
     print(f"Dataset split:  test_1=train  test_2=val  test_3=test (this script)\n")
 
-    positives, negatives = load_eval_samples()
+    positives, negatives, _ = load_eval_samples()
     wrapper = SAM3Wrapper()
     router  = load_router()
     router.eval()
     print(f"\nRouter: {len(router.layer_list)} layers  {router.layer_list[:4]}...{router.layer_list[-1]}")
+    print(f"Dataset split: 70% train | 20% val | 10% test  ← THIS SCRIPT uses the 10% test split")
     print(f"Evaluating {len(positives)} pos + {len(negatives)} neg "
           f"(oracle on first {N_ORACLE_POS} pos)\n")
 
@@ -392,6 +451,9 @@ def main():
 
     save_summary_plot(summary)
     save_layer_dist(layer_picks)
+    print(f"\nDataset split used:  70% train | 20% val | 10% test")
+    print(f"Oracle positives from 10% test split: {len(positives)}")
+    print(f"Negatives from test_3 (held-out):     {len(negatives)}")
     print("\nDone.")
 
 

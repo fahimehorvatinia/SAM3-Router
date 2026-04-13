@@ -38,7 +38,9 @@ OUT_DIR    = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 EPOCHS     = 150
 LR         = 1e-3
 BATCH_SIZE = 64
-VAL_FRAC   = 0.20
+# Split indices come from meta.json (70/20/10 created by collect_oracle_layers.py).
+# Training uses the 70% train split; val uses the 20% val split.
+# The 10% test split is reserved for eval_router_full.py.
 ALPHA      = 0.6        # weight for soft KL loss (vs hard CE)
 TEMPERATURE= 2.0        # softmax temperature for soft labels
 SEED       = 42
@@ -52,36 +54,43 @@ def load_data():
     with open(os.path.join(DATA_DIR, "meta.json")) as f:
         meta = json.load(f)
     layer_list = meta["layer_list"]
+    splits     = meta.get("splits", {})
 
-    print(f"Loaded: {text_embs.shape[0]} samples, {len(layer_list)} layers")
+    N = text_embs.shape[0]
+    train_idx = splits.get("train", list(range(int(N * 0.70))))
+    val_idx   = splits.get("val",   list(range(int(N * 0.70), int(N * 0.90))))
+    # test_idx reserved for eval_router_full.py
+
+    print(f"Loaded: {N} total samples, {len(layer_list)} layers")
     print(f"Layer list: {layer_list}")
+    print(f"Split (70/20/10): {len(train_idx)} train  {len(val_idx)} val  "
+          f"{N - len(train_idx) - len(val_idx)} test (reserved for eval)")
 
     X = torch.tensor(text_embs,   dtype=torch.float32)
     C = torch.tensor(cgf1_matrix, dtype=torch.float32)
 
     # Soft targets: normalize cgF1 per sample with temperature
-    # Add small epsilon to avoid all-zero rows (shouldn't happen — we filtered those)
     C_temp = C / TEMPERATURE
     soft = F.softmax(C_temp, dim=-1)   # [N, L]
 
     # Hard targets: argmax of cgF1 per sample
     hard = C.argmax(dim=-1)            # [N]  integer class indices
 
-    return X, soft, hard, layer_list
+    X_train, soft_train, hard_train = X[train_idx], soft[train_idx], hard[train_idx]
+    X_val,   soft_val,   hard_val   = X[val_idx],   soft[val_idx],   hard[val_idx]
+
+    return X_train, soft_train, hard_train, X_val, soft_val, hard_val, layer_list
 
 
 # ── Training ──────────────────────────────────────────────────────────────────
 def train():
     torch.manual_seed(SEED)
 
-    X, soft, hard, layer_list = load_data()
-    N = len(X)
+    X_train, soft_train, hard_train, X_val, soft_val, hard_val, layer_list = load_data()
+    n_train, n_val = len(X_train), len(X_val)
 
-    dataset   = TensorDataset(X, soft, hard)
-    n_val     = int(N * VAL_FRAC)
-    n_train   = N - n_val
-    train_ds, val_ds = random_split(dataset, [n_train, n_val],
-                                    generator=torch.Generator().manual_seed(SEED))
+    train_ds = TensorDataset(X_train, soft_train, hard_train)
+    val_ds   = TensorDataset(X_val,   soft_val,   hard_val)
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
     val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False)
@@ -93,7 +102,7 @@ def train():
     optimizer = torch.optim.Adam(router.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
-    print(f"\nTraining: {n_train} samples | Val: {n_val} samples")
+    print(f"\nTraining (70/20/10 split): {n_train} train | {n_val} val | test reserved")
     print(f"Device: {DEVICE}  Epochs: {EPOCHS}  LR: {LR}  Batch: {BATCH_SIZE}")
     print(f"Loss: α={ALPHA} × KL + {1-ALPHA:.1f} × CE  (T={TEMPERATURE})\n")
 

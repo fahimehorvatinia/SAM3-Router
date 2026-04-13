@@ -2,11 +2,18 @@
 # ============================================================
 # CAPR Full Pipeline — runs unattended
 #
+# Dataset split (70 / 20 / 10):
+#   70% → router training data  (oracle labels collected, used in train_router.py)
+#   20% → router validation     (used for early-stopping / val loss in train_router.py)
+#   10% → held-out test         (eval_router_full.py, IL_MCC primary metric)
+#
 # Steps:
 #   1. collect_oracle_layers.py  — sweep 16 layers on 1500 SA-Co test_1
 #                                  positives, save text_embs + cgF1_matrix
-#   2. train_router.py           — train CAPRRouter (KL + CE loss, 150 epochs)
-#   3. eval_router_full.py       — evaluate on SA-Co test_3 (500 pos + 500 neg)
+#                                  + writes 70/20/10 split indices to meta.json
+#   2. train_router.py           — train CAPRRouter on 70% split
+#                                  (KL + CE loss, 150 epochs, val on 20% split)
+#   3. eval_router_full.py       — evaluate on 10% test split + test_3 negatives
 #                                  primary metric: IL_MCC
 #
 # Output log: results/pipeline_run.log
