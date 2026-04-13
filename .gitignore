@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Large data files — not committed (download separately)
+results/router_training_data/*.npy
+results/eval_full_raw.csv
+results/eval_raw.csv
+results/pipeline_run.log
+
+# Environment
+.env
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Matplotlib cache
+.matplotlib/
+
+# Temporary files
+*.tmp
+*.bak
+nohup.out
