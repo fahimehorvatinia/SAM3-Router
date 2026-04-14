@@ -69,6 +69,22 @@ N_ORACLE_POS  = 100     # positives for oracle sweep if no pre-computed labels
 THRESHOLD     = 0.5     # fixed query-score threshold for presence detection
 SEED          = 77      # different from train (42) and val seeds
 
+# ── Gated router config ───────────────────────────────────────────────────────
+# The router was trained ONLY on "failed cases" — samples where the default
+# SAM3 layer (L32) under-performs the oracle by >= DELTA_THRESHOLD cgF1.
+# At inference we therefore apply the same gate: if L32 already confidently
+# detects the concept (query_score >= GATE_THRESHOLD), we trust L32 and do
+# not invoke the router.  Only when L32 is struggling (low query score) do we
+# ask the router to find a better backbone layer.
+#
+# Default: GATE_THRESHOLD = THRESHOLD = 0.5 — the same threshold used to
+# decide presence/absence.  A sample with q32 < 0.5 is one L32 would label
+# "absent"; the router is invoked to try to recover detection.
+# Lowered to 0.4: the v5 router is trained on more failed cases (DELTA>=0.02)
+# and uses a stronger image+text signal.  A lower gate means we route more
+# aggressively, which is appropriate when the router is more accurate.
+GATE_THRESHOLD = float(os.environ.get("GATE_THRESHOLD", "0.4"))
+
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 def load_eval_samples():
@@ -185,9 +201,9 @@ def evaluate(positives, negatives, wrapper, router):
 
     Returns list of per-sample result dicts.
     """
-    methods = ("l32", "hard", "moe", "oracle")
+    methods = ("l32", "hard", "moe", "gated", "oracle")
     records = []
-    layer_picks = {"hard": [], "oracle": []}   # for layer distribution plot
+    layer_picks = {"hard": [], "gated": [], "oracle": []}   # for layer distribution plot
 
     all_samples = positives + negatives
     random.shuffle(all_samples)
@@ -201,27 +217,51 @@ def evaluate(positives, negatives, wrapper, router):
         try:
             img = Image.open(sample["image_path"]).convert("RGB")
             pv, ids = wrapper.preprocess(img, sample["prompt"])
-            hs, backbone_lhs, text_emb_detr, text_emb_router = wrapper.extract(pv, ids)
+            hs, backbone_lhs, text_emb_detr, text_emb_router, img_emb_router = \
+                wrapper.extract(pv, ids)
         except Exception as e:
             continue
 
+        # ── Build router input based on what the router was trained on ─────────
+        # Router input_dim stored in the checkpoint determines which signal to use.
+        text_cpu = text_emb_router.cpu()
+        img_cpu  = img_emb_router.cpu()
+        if router.input_dim == 2048:
+            # v5 (default): concat(img_emb, text_emb) — image-dominant signal
+            router_input = torch.cat([img_cpu, text_cpu], dim=-1).unsqueeze(0)
+        elif router.input_dim == 256:
+            # v3 ablation: DETR cross-attention — run FPN(L32) + DETR decoder
+            detr_emb     = wrapper.extract_detr_emb(hs, backbone_lhs, text_emb_detr, pv)
+            router_input = detr_emb.cpu().unsqueeze(0)               # (1, 256)
+        else:
+            # 1024-dim: either img_only (v5 ablation) or text-only (v1 legacy)
+            router_input = img_cpu.unsqueeze(0)
+
         # ── Router weights (same for hard and MoE) ────────────────────────────
         with torch.no_grad():
-            txt          = text_emb_router.cpu().unsqueeze(0)
-            layer_weights = router.get_layer_weights(txt)
-            hard_layer    = router.hard_pick(txt)
+            layer_weights = router.get_layer_weights(router_input)
+            hard_layer    = router.hard_pick(router_input)
         layer_picks["hard"].append(hard_layer)
 
         row = dict(image_id=sample["image_id"], prompt=sample["prompt"],
                    is_present=int(is_pos))
 
         # ── Method 1: L32 default ─────────────────────────────────────────────
+        # IMPORTANT: query_score and mask computation are in SEPARATE try blocks.
+        # If resize_mask raises (e.g. GT shape mismatch on positive samples), the
+        # already-captured query_score must NOT be overwritten by the except clause.
+        # A single joint try was silently zeroing q32 for all positives.
         try:
             out32 = wrapper.run(img, hs, backbone_lhs, text_emb_detr, pv, layer_idx=32)
             q32   = out32["query_score"]
-            pred32 = resize_mask(out32["union_mask"], gt.shape) if (is_pos and gt is not None) else None
         except Exception:
-            q32 = 0.0; pred32 = None
+            q32 = 0.0; out32 = None
+        pred32 = None
+        if is_pos and out32 is not None and gt is not None:
+            try:
+                pred32 = resize_mask(out32["union_mask"], gt)
+            except Exception:
+                pass
         row["l32_query"]    = q32
         row["l32_detected"] = int(q32 >= THRESHOLD)
         row["l32_cgf1"]     = compute_cgf1(pred32, gt) if (is_pos and pred32 is not None and gt is not None) else None
@@ -231,9 +271,14 @@ def evaluate(positives, negatives, wrapper, router):
         try:
             out_h = wrapper.run(img, hs, backbone_lhs, text_emb_detr, pv, layer_idx=hard_layer)
             q_h   = out_h["query_score"]
-            pred_h = resize_mask(out_h["union_mask"], gt.shape) if (is_pos and gt is not None) else None
         except Exception:
-            q_h = 0.0; pred_h = None
+            q_h = 0.0; out_h = None
+        pred_h = None
+        if is_pos and out_h is not None and gt is not None:
+            try:
+                pred_h = resize_mask(out_h["union_mask"], gt)
+            except Exception:
+                pass
         row["hard_layer"]    = hard_layer
         row["hard_query"]    = q_h
         row["hard_detected"] = int(q_h >= THRESHOLD)
@@ -244,30 +289,67 @@ def evaluate(positives, negatives, wrapper, router):
         try:
             out_m = wrapper.run_moe(img, hs, backbone_lhs, text_emb_detr, pv, layer_weights)
             q_m   = out_m["query_score"]
-            pred_m = resize_mask(out_m["union_mask"], gt.shape) if (is_pos and gt is not None) else None
         except Exception:
-            q_m = 0.0; pred_m = None
+            q_m = 0.0; out_m = None
+        pred_m = None
+        if is_pos and out_m is not None and gt is not None:
+            try:
+                pred_m = resize_mask(out_m["union_mask"], gt)
+            except Exception:
+                pass
         row["moe_query"]    = q_m
         row["moe_detected"] = int(q_m >= THRESHOLD)
         row["moe_cgf1"]     = compute_cgf1(pred_m, gt) if (is_pos and pred_m is not None and gt is not None) else None
         row["moe_iou"]      = compute_iou(pred_m, gt)  if (is_pos and pred_m is not None and gt is not None) else None
 
-        # ── Method 4: Oracle (sweep all layers — positives only, limited N) ───
+        # ── Method 4: Gated Router ────────────────────────────────────────────
+        # The default SAM3 (L32) is already good — we only want to improve the
+        # cases where it FAILS.  If L32 confidently detects the concept
+        # (query_score >= GATE_THRESHOLD), we leave it alone.  Only when L32
+        # struggles do we invoke the router-selected layer to recover the missed
+        # detection.  This matches training: the router was trained exclusively
+        # on "failed cases" where oracle > L32 by >= DELTA_THRESHOLD cgF1.
+        if q32 >= GATE_THRESHOLD:
+            # L32 already working well — keep the L32 result unchanged
+            gated_layer = 32
+            row["gated_layer"]    = gated_layer
+            row["gated_query"]    = q32
+            row["gated_detected"] = row["l32_detected"]
+            row["gated_cgf1"]     = row["l32_cgf1"]
+            row["gated_iou"]      = row["l32_iou"]
+        else:
+            # L32 struggling — ask the router for a better backbone layer
+            gated_layer = hard_layer
+            row["gated_layer"]    = gated_layer
+            row["gated_query"]    = q_h
+            row["gated_detected"] = row["hard_detected"]
+            row["gated_cgf1"]     = row["hard_cgf1"]
+            row["gated_iou"]      = row["hard_iou"]
+        layer_picks["gated"].append(gated_layer)
+
+        # ── Method 5: Oracle (sweep all layers — positives only, limited N) ───
         if is_pos and oracle_pos_count < N_ORACLE_POS:
             oracle_pos_count += 1
             best_l, best_cgf1, best_iou, best_q = 32, 0.0, 0.0, 0.0
             for l in TRAIN_LAYERS:
+                # Separate model run from mask computation — same reason as above.
                 try:
                     out_l = wrapper.run(img, hs, backbone_lhs, text_emb_detr, pv, layer_idx=l)
-                    pred_l = resize_mask(out_l["union_mask"], gt.shape) if gt is not None else None
-                    cgf1_l = compute_cgf1(pred_l, gt) if pred_l is not None else 0.0
-                    if cgf1_l > best_cgf1:
-                        best_cgf1 = cgf1_l
-                        best_iou  = compute_iou(pred_l, gt) if pred_l is not None else 0.0
-                        best_l    = l
-                        best_q    = out_l["query_score"]
+                    q_l   = out_l["query_score"]
                 except Exception:
-                    pass
+                    continue
+                pred_l = None
+                if gt is not None:
+                    try:
+                        pred_l = resize_mask(out_l["union_mask"], gt)
+                    except Exception:
+                        pass
+                cgf1_l = compute_cgf1(pred_l, gt) if pred_l is not None else 0.0
+                if cgf1_l > best_cgf1:
+                    best_cgf1 = cgf1_l
+                    best_iou  = compute_iou(pred_l, gt) if pred_l is not None else 0.0
+                    best_l    = l
+                    best_q    = q_l
             row["oracle_layer"]    = best_l
             row["oracle_query"]    = best_q
             row["oracle_detected"] = int(best_q >= THRESHOLD)
@@ -286,10 +368,14 @@ def evaluate(positives, negatives, wrapper, router):
 # ── Aggregate metrics ─────────────────────────────────────────────────────────
 def aggregate(records):
     method_keys = {
-        "L32 default":  ("l32_detected",  "l32_query",  "l32_cgf1",  "l32_iou"),
-        "Router hard":  ("hard_detected", "hard_query", "hard_cgf1", "hard_iou"),
-        "Router MoE":   ("moe_detected",  "moe_query",  "moe_cgf1",  "moe_iou"),
-        "Oracle":       ("oracle_detected","oracle_query","oracle_cgf1","oracle_iou"),
+        "L32 default":  ("l32_detected",    "l32_query",    "l32_cgf1",    "l32_iou"),
+        "Router hard":  ("hard_detected",   "hard_query",   "hard_cgf1",   "hard_iou"),
+        "Router MoE":   ("moe_detected",    "moe_query",    "moe_cgf1",    "moe_iou"),
+        # Gated: use L32 when it already works; invoke router only on failed cases.
+        # Trained with FOCUS_FAILED=1 — router only learned from samples where
+        # routing over backbone layers can actually improve over L32.
+        "Gated Router": ("gated_detected",  "gated_query",  "gated_cgf1",  "gated_iou"),
+        "Oracle":       ("oracle_detected", "oracle_query", "oracle_cgf1", "oracle_iou"),
     }
     summary = {}
     for method, (det_key, q_key, cgf1_key, iou_key) in method_keys.items():
@@ -341,22 +427,25 @@ def save_csv(records):
 
 
 # ── Summary plot ──────────────────────────────────────────────────────────────
-def save_summary_plot(summary):
-    methods = [m for m in ("L32 default", "Router hard", "Router MoE", "Oracle")
+def save_summary_plot(summary, n_pos):
+    methods = [m for m in ("L32 default", "Router hard", "Router MoE",
+                            "Gated Router", "Oracle")
                if m in summary]
-    colors  = {"L32 default": "#d62728", "Router hard": "#2196F3",
-               "Router MoE": "#9C27B0",  "Oracle": "#ff7f0e"}
+    colors  = {"L32 default":  "#d62728", "Router hard": "#2196F3",
+               "Router MoE":   "#9C27B0", "Gated Router": "#4CAF50",
+               "Oracle":       "#ff7f0e"}
     metrics = [("IL_MCC", "IL_MCC  (main — presence discrimination)"),
                ("cgF1",   "cgF1 (mask quality, Dice vs GT)"),
                ("IoU",    "IoU vs GT"),
                ("pmF1",   "pmF1 (IoU ≥ 0.5 hit rate)")]
 
-    fig, axes = plt.subplots(1, 4, figsize=(18, 5))
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     fig.suptitle(
         f"CAPR Router Evaluation — SA-Co metaclip test_3  "
-        f"({N_POS} pos + {N_NEG} neg, threshold={THRESHOLD})\n"
+        f"({n_pos} pos + {N_NEG} neg, threshold={THRESHOLD})\n"
+        f"Gated: router invoked only when L32 fails (q<{GATE_THRESHOLD})  |  "
         f"Oracle on {N_ORACLE_POS} positives only",
-        fontsize=12, fontweight="bold")
+        fontsize=11, fontweight="bold")
 
     for ax, (metric, title) in zip(axes, metrics):
         vals  = [summary[m].get(metric, float("nan")) for m in methods]
@@ -388,10 +477,13 @@ def save_summary_plot(summary):
 
 # ── Layer distribution plot ───────────────────────────────────────────────────
 def save_layer_dist(layer_picks):
-    fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+    fig, axes = plt.subplots(1, 3, figsize=(20, 4))
     fig.suptitle("Layer selection distribution", fontsize=12, fontweight="bold")
     for ax, (key, title, color) in zip(axes, [
         ("hard",   "Router hard — predicted layer", "#2196F3"),
+        # Gated: shows which layer was actually used (32 when L32 worked; router pick otherwise)
+        ("gated",  f"Gated Router — layer used (L32 when q≥{GATE_THRESHOLD}, router otherwise)",
+                    "#4CAF50"),
         ("oracle", f"Oracle — best layer (first {N_ORACLE_POS} positives)", "#ff7f0e"),
     ]):
         picks = layer_picks.get(key, [])
@@ -435,7 +527,7 @@ def main():
           f"{'Recall':>7}  {'cgF1':>8}  {'IoU':>8}  {'pmF1':>8}")
     print("-" * 78)
     l32_mcc = summary.get("L32 default", {}).get("IL_MCC", float("nan"))
-    for method in ("L32 default", "Router hard", "Router MoE", "Oracle"):
+    for method in ("L32 default", "Router hard", "Router MoE", "Gated Router", "Oracle"):
         if method not in summary:
             continue
         s = summary[method]
@@ -449,7 +541,7 @@ def main():
               f"{s['IL_MCC']:>+8.4f}{tag:12s}  {s['precision']:>7.4f}  "
               f"{s['recall']:>7.4f}  {cgf1:>8s}  {iou:>8s}  {pmf1:>8s}")
 
-    save_summary_plot(summary)
+    save_summary_plot(summary, n_pos=len(positives))
     save_layer_dist(layer_picks)
     print(f"\nDataset split used:  70% train | 20% val | 10% test")
     print(f"Oracle positives from 10% test split: {len(positives)}")

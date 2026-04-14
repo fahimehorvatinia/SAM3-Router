@@ -78,6 +78,7 @@ def resize_mask(pred, gt):
 # ── Collection loop ───────────────────────────────────────────────────────────
 def collect(samples, wrapper):
     text_embs   = []
+    img_embs    = []
     cgf1_matrix = []
     meta        = []
 
@@ -103,7 +104,8 @@ def collect(samples, wrapper):
         # Backbone + text encoder (ONCE per sample)
         try:
             pv, ids = wrapper.preprocess(img, sample["prompt"])
-            hs, backbone_lhs, text_emb_detr, text_emb_router = wrapper.extract(pv, ids)
+            hs, backbone_lhs, text_emb_detr, text_emb_router, img_emb_router = \
+                wrapper.extract(pv, ids)
         except Exception as e:
             skipped += 1; continue
 
@@ -123,16 +125,20 @@ def collect(samples, wrapper):
         if max(row) < 0.01:
             skipped += 1; continue
 
-        text_embs.append(text_emb_router.cpu().float().numpy())  # (1024,)
-        cgf1_matrix.append(row)                                   # (16,)
+        text_embs.append(text_emb_router.cpu().float().numpy())   # (1024,)
+        img_embs.append(img_emb_router.cpu().float().numpy())     # (1024,)
+        cgf1_matrix.append(row)                                    # (16,)
         meta.append(dict(image_id=sample["image_id"], prompt=sample["prompt"]))
 
     print(f"\nCollected: {len(text_embs)}  skipped: {skipped}")
-    return np.array(text_embs, dtype=np.float32), np.array(cgf1_matrix, dtype=np.float32), meta
+    return (np.array(text_embs,   dtype=np.float32),
+            np.array(img_embs,    dtype=np.float32),
+            np.array(cgf1_matrix, dtype=np.float32),
+            meta)
 
 
 # ── Save ──────────────────────────────────────────────────────────────────────
-def save(text_embs, cgf1_matrix, meta):
+def save(text_embs, img_embs, cgf1_matrix, meta):
     N = len(meta)
     # 70 / 20 / 10 split — deterministic, based on index order (already shuffled)
     n_train = int(N * 0.70)
@@ -145,6 +151,7 @@ def save(text_embs, cgf1_matrix, meta):
     )
 
     np.save(os.path.join(OUT_DIR, "text_embs.npy"),   text_embs)
+    np.save(os.path.join(OUT_DIR, "img_embs.npy"),    img_embs)
     np.save(os.path.join(OUT_DIR, "cgf1_matrix.npy"), cgf1_matrix)
     with open(os.path.join(OUT_DIR, "meta.json"), "w") as f:
         json.dump({"layer_list": TRAIN_LAYERS, "samples": meta,
@@ -178,8 +185,8 @@ def main():
 
     samples = load_positives()
     wrapper = SAM3Wrapper()
-    text_embs, cgf1_matrix, meta = collect(samples, wrapper)
-    save(text_embs, cgf1_matrix, meta)
+    text_embs, img_embs, cgf1_matrix, meta = collect(samples, wrapper)
+    save(text_embs, img_embs, cgf1_matrix, meta)
 
 
 if __name__ == "__main__":

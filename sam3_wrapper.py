@@ -73,7 +73,7 @@ class SAM3Wrapper:
     @torch.no_grad()
     def extract(
         self, pixel_values: torch.Tensor, input_ids: torch.Tensor
-    ) -> Tuple[tuple, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[tuple, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Run backbone + text encoder ONCE per image/prompt pair.
 
@@ -84,17 +84,23 @@ class SAM3Wrapper:
                                passes as last_hidden_state in Sam3VisionEncoderOutput.
                                This is NOT the same as hidden_states[32].
             text_emb_detr    : (1, seq, D) pooler_output used by SAM3 DETR head
-            text_emb_router  : (1024,) mean-pooled embedding used by the CAPR router
+            text_emb_router  : (1024,) mean-pooled text embedding used by the CAPR router
+            img_emb_router   : (1024,) mean-pooled final-layer image embedding for routing.
+                               Computed as spatial mean of hidden_states[32] (before LayerNorm).
+                               Together with text_emb_router, forms the (2048,) router input.
         """
         backbone_out    = self.model.vision_encoder.backbone(pixel_values, output_hidden_states=True)
         text_out        = self.model.get_text_features(input_ids=input_ids, return_dict=True)
         text_emb_detr   = text_out.pooler_output
-        text_emb_router = text_out.last_hidden_state.mean(dim=1).squeeze(0)
+        text_emb_router = text_out.last_hidden_state.mean(dim=1).squeeze(0)   # (1024,)
+        # Mean-pool hidden_states[32] over spatial dims (H=72, W=72) → (1024,)
+        img_emb_router  = backbone_out.hidden_states[32].mean(dim=(1, 2)).squeeze(0)  # (1024,)
         return (
             backbone_out.hidden_states,       # tuple of 33 spatial tensors
             backbone_out.last_hidden_state,   # separate — passed to Sam3VisionEncoderOutput
             text_emb_detr,
             text_emb_router,
+            img_emb_router,
         )
 
     def _build_output(
@@ -195,6 +201,69 @@ class SAM3Wrapper:
         spatial = target.view(B, H, W, -1).permute(0, 3, 1, 2)   # (B, C, H, W)
 
         return self._build_output(spatial, backbone_lhs, hidden_states, text_emb_detr, image)
+
+    @torch.no_grad()
+    def extract_detr_emb(
+        self,
+        hidden_states: tuple,
+        backbone_lhs: torch.Tensor,
+        text_emb_detr: torch.Tensor,
+        pixel_values: torch.Tensor,
+        layer_idx: int = SAM3_DEFAULT,
+    ) -> torch.Tensor:
+        """
+        Run FPN neck + DETR decoder for a given backbone layer and return the
+        cross-attention fusion embedding for routing.
+
+        This is the output of SAM3's own text-image cross-attention:
+          detr_decoder.intermediate_hidden_states[-1]  →  (B, 200, 256)
+          mean over 200 queries                        →  (256,)
+
+        This is richer than concat(text_emb, img_emb) because SAM3 has already
+        learned to align text concepts with image regions inside the DETR decoder.
+
+        Args:
+            layer_idx : which backbone layer to inject (default=32 for routing pass)
+        Returns:
+            detr_emb  : (256,) cross-modal fusion embedding
+        """
+        layer_idx = max(0, min(layer_idx, 32))
+        target    = hidden_states[layer_idx]
+        target    = self.model.vision_encoder.backbone.layer_norm(target)
+
+        B  = target.shape[0]
+        H  = pixel_values.shape[-2] // PATCH_SIZE
+        W  = pixel_values.shape[-1] // PATCH_SIZE
+        spatial = target.view(B, H, W, -1).permute(0, 3, 1, 2)
+
+        fpn_feats, fpn_pos = self.model.vision_encoder.neck(spatial)
+
+        # Register a one-time hook to capture intermediate_hidden_states
+        captured = {}
+        def _hook(module, inp, out):
+            captured["dec"] = out
+        handle = self.model.detr_decoder.register_forward_hook(_hook)
+
+        # Pass hidden_states=None here — the DETR forward only needs fpn_hidden_states
+        # and fpn_position_encoding; the raw hidden_states field is not consumed downstream.
+        # Passing the real hs tuple would let SAM3 potentially modify those tensors
+        # in-place, silently corrupting the caller's hs for all subsequent wrapper.run()
+        # calls in the same sample loop.
+        vision_embeds = Sam3VisionEncoderOutput(
+            last_hidden_state=backbone_lhs,
+            fpn_hidden_states=fpn_feats,
+            fpn_position_encoding=fpn_pos,
+            hidden_states=None,
+            attentions=None,
+        )
+        self.model(vision_embeds=vision_embeds, text_embeds=text_emb_detr)
+        handle.remove()
+
+        # intermediate_hidden_states: (num_decoder_layers, B, num_queries, 256)
+        # Use last decoder layer, mean-pool over 200 queries → (256,)
+        dec_out = captured["dec"]
+        detr_emb = dec_out.intermediate_hidden_states[-1].mean(dim=1).squeeze(0)  # (256,)
+        return detr_emb.float()
 
     @torch.no_grad()
     def run_moe(

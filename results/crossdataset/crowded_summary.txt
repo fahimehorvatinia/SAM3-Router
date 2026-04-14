@@ -1,0 +1,9 @@
+Dataset: crowded
+N_POS=200  N_NEG=500  GATE_THRESHOLD=0.5
+
+        Method    IL_MCC    Prec  Recall    cgF1     IoU
+------------------------------------------------------------
+   L32 default   +0.3450  0.3878  0.9500  0.6422  0.5388
+   Router hard   +0.2538  0.3670  0.8550  0.5322  0.4346
+    Router MoE   +0.2772  0.3655  0.9100  0.6172  0.5162
+  Gated Router   +0.3037  0.3643  0.9600  0.6484  0.5434
