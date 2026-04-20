@@ -1,6 +1,6 @@
-# CAPR: Concept-Adaptive Presence Routing for SAM3
+# ALSR: Automated Layer Selection Router for SAM3
 
-**CAPR** (Concept-Adaptive Presence Routing) is a lightweight plug-in for SAM3 that improves visual concept grounding on difficult cases by adaptively selecting which backbone layer to use per query, rather than always defaulting to the final layer (L32). SAM3 weights remain **fully frozen** — only a small MLP router is trained.
+**ALSR** (Automated Layer Selection Router) is a lightweight plug-in for SAM3 that improves visual concept grounding on difficult cases by adaptively selecting which backbone layer to use per query, rather than always defaulting to the final layer (L32). SAM3 weights remain **fully frozen** — only a small MLP router is trained.
 
 ---
 
@@ -36,7 +36,7 @@ Image + Text Query
              /                  \
            YES                   NO
             │                    │
-        use L32             CAPR Router MLP
+        use L32             ALSR Router MLP
         result            (256→128→64→16)
                                  │ top-1 layer k
                           FPN(Lk) → DETR
@@ -175,7 +175,7 @@ The gate aligns with training: the router was only supervised on samples where L
 | SAM3 L32 (baseline) | 0.2358 | 0.9635 | 0.6325 | 0.5352 | 0.6058 |
 | Router Hard | +0.2165 | 0.9270 | 0.6150 | 0.5237 | 0.5693 |
 | Router MoE | +0.1721 | 0.9343 | 0.6341 | 0.5479 | 0.5912 |
-| **Gated CAPR Router** | **+0.2286** | **0.9854** | **0.6453** | **0.5448** | **0.6131** |
+| **Gated ALSR Router** | **+0.2286** | **0.9854** | **0.6453** | **0.5448** | **0.6131** |
 
 
 **Gated Router gains over L32:** recall +2.2pp, cgF1 +1.3pp, IoU +1.0pp, pmF1 +0.7pp, IL_MCC −0.007 (negligible).
@@ -187,15 +187,15 @@ The router was trained on SA-Co MetaCLIP (test_1) and evaluated **zero-shot** on
 | Dataset | Method | IL_MCC | Recall | cgF1 | IoU |
 |---|---|---|---|---|---|
 | MetaCLIP | L32 baseline | 0.204 | 0.880 | 0.637 | 0.559 |
-| MetaCLIP | **Gated CAPR** | **+0.164** | **0.900** | **0.648** | **0.567** |
+| MetaCLIP | **Gated ALSR** | **+0.164** | **0.900** | **0.648** | **0.567** |
 | Attributes | L32 baseline | 0.239 | 0.990 | 0.847 | 0.786 |
-| Attributes | **Gated CAPR** | **+0.216** | **0.995** | **0.849** | **0.787** |
+| Attributes | **Gated ALSR** | **+0.216** | **0.995** | **0.849** | **0.787** |
 | Crowded | L32 baseline | 0.345 | 0.950 | 0.642 | 0.539 |
-| Crowded | **Gated CAPR** | **+0.304** | **0.960** | **0.648** | **0.543** |
+| Crowded | **Gated ALSR** | **+0.304** | **0.960** | **0.648** | **0.543** |
 | Wiki-Food&Drink | L32 baseline | 0.270 | 0.970 | 0.756 | 0.680 |
-| Wiki-Food&Drink | **Gated CAPR** | +0.212 | **0.980** | **0.765** | **0.688** |
+| Wiki-Food&Drink | **Gated ALSR** | +0.212 | **0.980** | **0.765** | **0.688** |
 | Wiki-Sports Equip. | L32 baseline | 0.278 | 0.940 | 0.803 | 0.741 |
-| Wiki-Sports Equip. | **Gated CAPR** | **+0.239** | **0.950** | **0.807** | **0.743** |
+| Wiki-Sports Equip. | **Gated ALSR** | **+0.239** | **0.950** | **0.807** | **0.743** |
 
 **The Gated Router consistently improves recall (+1.0–2.0pp) and cgF1 (+0.1–0.9pp) across all domains without retraining.**
 
@@ -209,16 +209,16 @@ The router was trained on SA-Co MetaCLIP (test_1) and evaluated **zero-shot** on
 ## Project Structure
 
 ```
-capr_clean/
+ALSR_clean/
 ├── sam3_wrapper.py                  # SAM3 wrapper: embed extraction, layer injection, DETR
-├── capr_router.py                   # CAPRRouter MLP + load_router() + hard_pick() + run_moe()
+├── ALSR_router.py                   # ALSRRouter MLP + load_router() + hard_pick() + run_moe()
 ├── metrics.py                       # cgF1, IoU, IL_MCC, merge_gt_masks
 ├── evaluate.py                      # Full evaluation entry point
 ├── demo_cap.py                      # Visual demo: side-by-side mask comparison
 ├── experiments/
 │   ├── collect_oracle_layers.py     # Step 1: sweep L17-L32, record cgF1 matrix per image
 │   ├── extract_detr_embs.py         # Step 1b: extract 256-dim DETR routing embeddings
-│   ├── train_router.py              # Step 2: train CAPR MLP router (KL + CE loss)
+│   ├── train_router.py              # Step 2: train ALSR MLP router (KL + CE loss)
 │   ├── eval_router_full.py          # Step 3: full evaluation on metaclip test split
 │   ├── eval_crossdataset.py         # Cross-domain evaluation on any SA-Co split
 │   ├── eval_router.py               # Quick detection-only evaluation
@@ -232,7 +232,7 @@ capr_clean/
 │   │   ├── img_embs.npy             # [1368, 1024] SAM3 image backbone embeddings
 │   │   └── meta.json                # image IDs, prompts, 70/20/10 train/val/test splits
 │   ├── crossdataset/                # Per-dataset CSVs and summaries
-│   ├── capr_router_weights.pt       # Trained router checkpoint (auto-detected by load_router)
+│   ├── ALSR_router_weights.pt       # Trained router checkpoint (auto-detected by load_router)
 │   └── eval_full_raw.csv            # Per-sample evaluation results
 ├── run_v4_pipeline.sh               # End-to-end pipeline (best DETR config)
 ├── run_v5_pipeline.sh               # Pipeline with img+text concat router
@@ -259,7 +259,7 @@ IMAGE_ROOT = "/path/to/metaclip-images"
 ## Running the Full Pipeline
 
 ```bash
-cd capr_clean
+cd ALSR_clean
 
 # Step 1: Collect oracle labels (SAM3 × 16 layers × N images, ~2h for 1500 images)
 python experiments/collect_oracle_layers.py
@@ -316,8 +316,8 @@ nohup bash run_v4_pipeline.sh > results/pipeline_v4.log 2>&1 &
 ## Citation
 
 ```bibtex
-@article{horvatinia2026capr,
-  title   = {CAPR: Concept-Adaptive Presence Routing for SAM3},
+@article{horvatinia2026ALSR,
+  title   = {ALSR: Automated Layer Selection Router for SAM3},
   author  = {Horvatinia, Fahime},
   year    = {2026}
 }
