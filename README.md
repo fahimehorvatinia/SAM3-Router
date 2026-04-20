@@ -190,11 +190,11 @@ The router was trained on SA-Co MetaCLIP (test_1) and evaluated **zero-shot** on
 | MetaCLIP | **Gated CAPR** | **+0.164** | **0.900** | **0.648** | **0.567** |
 | Attributes | L32 baseline | 0.239 | 0.990 | 0.847 | 0.786 |
 | Attributes | **Gated CAPR** | **+0.216** | **0.995** | **0.849** | **0.787** |
-| Crowded | L32 baseline | **+0.345** | 0.950 | 0.642 | 0.539 |
-| Crowded | **Gated CAPR** | +0.304 | **0.960** | **0.648** | **0.543** |
-| Wiki-Food&Drink | L32 baseline | +0.270 | 0.970 | 0.756 | 0.680 |
+| Crowded | L32 baseline | 0.345 | 0.950 | 0.642 | 0.539 |
+| Crowded | **Gated CAPR** | **+0.304** | **0.960** | **0.648** | **0.543** |
+| Wiki-Food&Drink | L32 baseline | 0.270 | 0.970 | 0.756 | 0.680 |
 | Wiki-Food&Drink | **Gated CAPR** | +0.212 | **0.980** | **0.765** | **0.688** |
-| Wiki-Sports Equip. | L32 baseline | +0.278 | 0.940 | 0.803 | 0.741 |
+| Wiki-Sports Equip. | L32 baseline | 0.278 | 0.940 | 0.803 | 0.741 |
 | Wiki-Sports Equip. | **Gated CAPR** | **+0.239** | **0.950** | **0.807** | **0.743** |
 
 **The Gated Router consistently improves recall (+1.0–2.0pp) and cgF1 (+0.1–0.9pp) across all domains without retraining.**
