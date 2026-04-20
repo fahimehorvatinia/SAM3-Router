@@ -172,11 +172,11 @@ The gate aligns with training: the router was only supervised on samples where L
 
 | Method | IL_MCC | Recall | cgF1 | IoU | pmF1 |
 |---|---|---|---|---|---|
-| SAM3 L32 (baseline) | +0.2358 | 0.9635 | 0.6325 | 0.5352 | 0.6058 |
+| SAM3 L32 (baseline) | 0.2358 | 0.9635 | 0.6325 | 0.5352 | 0.6058 |
 | Router Hard | +0.2165 | 0.9270 | 0.6150 | 0.5237 | 0.5693 |
 | Router MoE | +0.1721 | 0.9343 | 0.6341 | 0.5479 | 0.5912 |
 | **Gated CAPR Router** | **+0.2286** | **0.9854** | **0.6453** | **0.5448** | **0.6131** |
-| Oracle (upper bound) | — | 1.0000 | 0.7481 | 0.6564 | 0.7100 |
+
 
 **Gated Router gains over L32:** recall +2.2pp, cgF1 +1.3pp, IoU +1.0pp, pmF1 +0.7pp, IL_MCC −0.007 (negligible).
 
@@ -186,9 +186,9 @@ The router was trained on SA-Co MetaCLIP (test_1) and evaluated **zero-shot** on
 
 | Dataset | Method | IL_MCC | Recall | cgF1 | IoU |
 |---|---|---|---|---|---|
-| MetaCLIP | L32 baseline | +0.204 | 0.880 | 0.637 | 0.559 |
+| MetaCLIP | L32 baseline | 0.204 | 0.880 | 0.637 | 0.559 |
 | MetaCLIP | **Gated CAPR** | **+0.164** | **0.900** | **0.648** | **0.567** |
-| Attributes | L32 baseline | +0.239 | 0.990 | 0.847 | 0.786 |
+| Attributes | L32 baseline | 0.239 | 0.990 | 0.847 | 0.786 |
 | Attributes | **Gated CAPR** | **+0.216** | **0.995** | **0.849** | **0.787** |
 | Crowded | L32 baseline | **+0.345** | 0.950 | 0.642 | 0.539 |
 | Crowded | **Gated CAPR** | +0.304 | **0.960** | **0.648** | **0.543** |
