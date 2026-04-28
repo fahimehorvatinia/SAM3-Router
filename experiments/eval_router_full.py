@@ -48,7 +48,7 @@ from sklearn.metrics import matthews_corrcoef
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sam3_wrapper import SAM3Wrapper
-from capr_router import load_router
+from capr_router import load_router, AttentionCAPRRouter
 from metrics import compute_cgf1, compute_iou, merge_gt_masks
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -223,10 +223,13 @@ def evaluate(positives, negatives, wrapper, router):
             continue
 
         # ── Build router input based on what the router was trained on ─────────
-        # Router input_dim stored in the checkpoint determines which signal to use.
         text_cpu = text_emb_router.cpu()
         img_cpu  = img_emb_router.cpu()
-        if router.input_dim == 2048:
+        if isinstance(router, AttentionCAPRRouter):
+            # v4 attention router: full per-query DETR sequence (1, 200, 256)
+            detr_seq     = wrapper.extract_detr_emb_full(hs, backbone_lhs, text_emb_detr, pv)
+            router_input = detr_seq.cpu().unsqueeze(0)               # (1, 200, 256)
+        elif router.input_dim == 2048:
             # v5 (default): concat(img_emb, text_emb) — image-dominant signal
             router_input = torch.cat([img_cpu, text_cpu], dim=-1).unsqueeze(0)
         elif router.input_dim == 256:
@@ -511,7 +514,8 @@ def main():
 
     positives, negatives, _ = load_eval_samples()
     wrapper = SAM3Wrapper()
-    router  = load_router()
+    weights_path = os.environ.get("ROUTER_WEIGHTS", None)
+    router  = load_router(weights_path)
     router.eval()
     print(f"\nRouter: {len(router.layer_list)} layers  {router.layer_list[:4]}...{router.layer_list[-1]}")
     print(f"Dataset split: 70% train | 20% val | 10% test  ← THIS SCRIPT uses the 10% test split")

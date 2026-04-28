@@ -9,11 +9,25 @@ build/
 # Jupyter
 .ipynb_checkpoints/
 
+# Report (kept separate)
+report/
+*.pdf
+
 # Large data files — not committed (download separately)
 results/router_training_data/*.npy
+results/router_training_data_diverse/
 results/eval_full_raw.csv
 results/eval_raw.csv
+results/eval_diverse_raw.csv
 results/pipeline_run.log
+results/diverse_pipeline.log
+results/eval_attn_router.log
+results/train_attn_router.log
+results/latency_benchmark.log
+
+# Large model weights
+results/capr_router_weights_attn.pt
+results/capr_router_weights_diverse.pt
 
 # Environment
 .env

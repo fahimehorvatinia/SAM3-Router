@@ -266,6 +266,54 @@ class SAM3Wrapper:
         return detr_emb.float()
 
     @torch.no_grad()
+    def extract_detr_emb_full(
+        self,
+        hidden_states: tuple,
+        backbone_lhs: torch.Tensor,
+        text_emb_detr: torch.Tensor,
+        pixel_values: torch.Tensor,
+        layer_idx: int = SAM3_DEFAULT,
+    ) -> torch.Tensor:
+        """
+        Like extract_detr_emb() but returns the FULL per-query sequence instead
+        of the mean-pooled vector. Used by the attention-based router which learns
+        to weight queries rather than treating them as equally informative.
+
+        Returns:
+            detr_emb_full : (200, 256) — last DETR decoder layer, all 200 queries
+        """
+        layer_idx = max(0, min(layer_idx, 32))
+        target    = hidden_states[layer_idx]
+        target    = self.model.vision_encoder.backbone.layer_norm(target)
+
+        B  = target.shape[0]
+        H  = pixel_values.shape[-2] // PATCH_SIZE
+        W  = pixel_values.shape[-1] // PATCH_SIZE
+        spatial = target.view(B, H, W, -1).permute(0, 3, 1, 2)
+
+        fpn_feats, fpn_pos = self.model.vision_encoder.neck(spatial)
+
+        captured = {}
+        def _hook(module, inp, out):
+            captured["dec"] = out
+        handle = self.model.detr_decoder.register_forward_hook(_hook)
+
+        vision_embeds = Sam3VisionEncoderOutput(
+            last_hidden_state=backbone_lhs,
+            fpn_hidden_states=fpn_feats,
+            fpn_position_encoding=fpn_pos,
+            hidden_states=None,
+            attentions=None,
+        )
+        self.model(vision_embeds=vision_embeds, text_embeds=text_emb_detr)
+        handle.remove()
+
+        # (B, 200, 256) → (200, 256) after squeeze
+        dec_out = captured["dec"]
+        detr_emb_full = dec_out.intermediate_hidden_states[-1].squeeze(0)  # (200, 256)
+        return detr_emb_full.float()
+
+    @torch.no_grad()
     def run_moe(
         self,
         image: Image.Image,

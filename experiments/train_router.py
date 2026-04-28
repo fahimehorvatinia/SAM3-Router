@@ -27,11 +27,14 @@ import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from capr_router import CAPRRouter
+from capr_router import CAPRRouter, AttentionCAPRRouter
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DATA_DIR   = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                          "results", "router_training_data")
+# DATA_DIR can be overridden via environment variable to point at diverse data:
+#   DATA_DIR=.../router_training_data_diverse python experiments/train_router.py
+_default_data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "results", "router_training_data")
+DATA_DIR   = os.environ.get("DATA_DIR", _default_data_dir)
 OUT_DIR    = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "results")
 
@@ -78,10 +81,12 @@ FOCUS_FAILED    = os.environ.get("FOCUS_FAILED", "1").lower() not in ("0", "fals
 # that the optimal backbone layer depends more on image content than concept text:
 # the same concept on a cluttered vs. clean background requires different layers.
 def detect_emb_mode():
+    if os.path.exists(os.path.join(DATA_DIR, "detr_embs_full.npy")):
+        return "detr_full"  # attention router — full (200, 256) per-query sequence
     if os.path.exists(os.path.join(DATA_DIR, "img_embs.npy")):
-        return "concat"  # concat(img, text) — strongest signal
+        return "concat"    # concat(img, text) — (2048,)
     if os.path.exists(os.path.join(DATA_DIR, "detr_embs.npy")):
-        return "detr"
+        return "detr"      # mean-pooled DETR (256,)
     return "text"
 
 EMB_MODE = os.environ.get("EMB_MODE", detect_emb_mode())
@@ -96,7 +101,12 @@ def load_data():
     splits     = meta.get("splits", {})
 
     # ── Choose router input embedding ────────────────────────────────────────
-    if EMB_MODE == "concat":
+    if EMB_MODE == "detr_full":
+        # Attention router (v4): full per-query DETR sequence (200, 256).
+        # Requires extract_detr_embs_full.py to have been run first.
+        router_embs = np.load(os.path.join(DATA_DIR, "detr_embs_full.npy"))  # [N, 200, 256]
+        mode_label  = "DETR full query sequence (200×256) — attention router v4"
+    elif EMB_MODE == "concat":
         # Primary signal: concat(img_emb, text_emb).
         # Image embedding captures spatial/appearance features that drive which
         # backbone layer is optimal.  Text adds concept-level context.
@@ -199,9 +209,21 @@ def train():
     val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False)
 
     num_layers = len(layer_list)
-    input_dim  = X_train.shape[1]   # 2048 for concat(text, img)
-    router = CAPRRouter(input_dim=input_dim, num_layers=num_layers,
-                        layer_list=layer_list).to(DEVICE)
+    if EMB_MODE == "detr_full":
+        # Attention router: input is (N, 200, 256); DataLoader will give (B, 200, 256)
+        router = AttentionCAPRRouter(
+            num_queries=X_train.shape[1],   # 200
+            query_dim=X_train.shape[2],     # 256
+            num_heads=4,
+            num_attn_layers=1,
+            num_layers=num_layers,
+            layer_list=layer_list,
+        ).to(DEVICE)
+        input_dim = -1  # not a flat dim; used only for logging
+    else:
+        input_dim = X_train.shape[1]        # flat embedding dim
+        router = CAPRRouter(input_dim=input_dim, num_layers=num_layers,
+                            layer_list=layer_list).to(DEVICE)
 
     optimizer = torch.optim.AdamW(router.parameters(), lr=LR, weight_decay=1e-3)
     # Warmup 10 epochs → cosine decay to 0.  Warmup prevents early collapse
@@ -215,10 +237,11 @@ def train():
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     ce_weights = class_weights.to(DEVICE) if USE_CLASS_WEIGHTS else None
 
-    mode_names = {256: "DETR cross-attn", 2048: "img+text concat", 1024: "img-only or text-only"}
+    mode_names = {256: "DETR cross-attn", 2048: "img+text concat", 1024: "img-only or text-only",
+                  -1: "DETR full sequence (attention router v4)"}
     print(f"\nTraining (70/20/10 split): {n_train} train | {n_val} val | test reserved")
     print(f"Device: {DEVICE}  Epochs: {EPOCHS}  LR: {LR}  Batch: {BATCH_SIZE}")
-    print(f"Router input_dim: {input_dim}  ({mode_names.get(input_dim, 'custom')})")
+    print(f"Router input: {mode_names.get(input_dim, f'{input_dim}-dim')}")
     print(f"Loss: α={ALPHA} × KL + {1-ALPHA:.1f} × CE  (T={TEMPERATURE})")
     print(f"Class-weighted CE: {USE_CLASS_WEIGHTS}  (prevents collapse to dominant layers)\n")
 
@@ -232,7 +255,13 @@ def train():
         t_loss = 0.0
         for xb, sb, hb in train_loader:
             xb, sb, hb = xb.to(DEVICE), sb.to(DEVICE), hb.to(DEVICE)
-            logits = router.mlp(xb)             # [B, L] (before softmax)
+            # Both MLP and attention routers expose a forward() that returns
+            # softmax probabilities; get raw logits via the respective internals.
+            if EMB_MODE == "detr_full":
+                probs  = router(xb)                          # [B, L] softmax
+                logits = torch.log(probs.clamp(min=1e-9))    # log-probs for CE
+            else:
+                logits = router.mlp(xb)                      # [B, L] pre-softmax
             log_p  = F.log_softmax(logits, dim=-1)
 
             kl_loss = F.kl_div(log_p, sb, reduction="batchmean")
@@ -252,7 +281,11 @@ def train():
         with torch.no_grad():
             for xb, sb, hb in val_loader:
                 xb, sb, hb = xb.to(DEVICE), sb.to(DEVICE), hb.to(DEVICE)
-                logits  = router.mlp(xb)
+                if EMB_MODE == "detr_full":
+                    probs  = router(xb)
+                    logits = torch.log(probs.clamp(min=1e-9))
+                else:
+                    logits = router.mlp(xb)
                 log_p   = F.log_softmax(logits, dim=-1)
                 kl_loss = F.kl_div(log_p, sb, reduction="batchmean")
                 ce_loss = F.cross_entropy(logits, hb)
@@ -280,7 +313,13 @@ def train():
     # load_router() can reconstruct the correct CAPRRouter without guessing.
     save_dict = dict(best_weights)
     save_dict["_layer_list"] = torch.tensor(layer_list, dtype=torch.long)
-    weights_path = os.path.join(OUT_DIR, "capr_router_weights.pt")
+    save_dict["_emb_mode"]   = torch.tensor(0)  # placeholder; mode stored in filename
+    is_diverse = "diverse" in DATA_DIR
+    if EMB_MODE == "detr_full":
+        fname = "capr_router_weights_attn_diverse.pt" if is_diverse else "capr_router_weights_attn.pt"
+    else:
+        fname = "capr_router_weights_diverse.pt" if is_diverse else "capr_router_weights.pt"
+    weights_path = os.path.join(OUT_DIR, fname)
     torch.save(save_dict, weights_path)
     print(f"\nBest checkpoint saved: {weights_path}")
     print(f"  best_val_loss = {best_val_loss:.4f}")
@@ -290,7 +329,7 @@ def train():
     ax.plot(train_losses, label="train loss")
     ax.plot(val_losses,   label="val loss", linestyle="--")
     ax.set_xlabel("Epoch"); ax.set_ylabel("Loss")
-    ax.set_title("CAPR Router Training — KL + CE Loss"); ax.legend(); ax.grid(alpha=0.3)
+    ax.set_title("CAPR Router Training: KL + CE Loss"); ax.legend(); ax.grid(alpha=0.3)
     curve_path = os.path.join(OUT_DIR, "router_training_curve.png")
     fig.savefig(curve_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -303,7 +342,11 @@ def train():
     with torch.no_grad():
         for xb, sb, hb in val_loader:
             xb = xb.to(DEVICE)
-            pred_layers.extend(router.mlp(xb).argmax(dim=-1).cpu().tolist())
+            if EMB_MODE == "detr_full":
+                logits = torch.log(router(xb).clamp(min=1e-9))
+            else:
+                logits = router.mlp(xb)
+            pred_layers.extend(logits.argmax(dim=-1).cpu().tolist())
             true_layers.extend(hb.tolist())
     pred_layers = np.array(pred_layers)
     true_layers = np.array(true_layers)

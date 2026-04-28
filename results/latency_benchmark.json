@@ -1,0 +1,19 @@
+{
+  "device": "cuda",
+  "n_samples": 20,
+  "gate_threshold": 0.5,
+  "gate_rate": 0.03600000000000003,
+  "gate_rate_source": "from paper (1 - recall@L32)",
+  "router_layer": 28,
+  "backbone_ms_mean": 223.04739174433053,
+  "backbone_ms_std": 2.832698961438302,
+  "first_detr_ms_mean": 59.331097127869725,
+  "first_detr_ms_std": 5.145223258454926,
+  "router_mlp_ms_mean": 0.3191088791936636,
+  "router_mlp_ms_std": 0.6731843221288408,
+  "second_detr_ms_mean": 60.30022227205336,
+  "second_detr_ms_std": 5.6451664231221965,
+  "e2e_l32_ms_mean": 282.37848887220025,
+  "expected_overhead_ms": 2.170808001793923,
+  "overhead_pct": 0.7687582756264392
+}

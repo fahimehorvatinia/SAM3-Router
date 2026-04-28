@@ -177,9 +177,9 @@ def save_comparison(image, results, gt_mask, best_idx, moe_r, hard_r, path):
         (overlay_all_masks(img_arr, best_masks) if best_masks else img_arr,
          f"Oracle best ({layer_label(best_idx)})\n{best_n} masks  cgF1={best_cgf1:.3f}  IoU={best_iou:.3f}", "#ff7f0e"),
         (overlay_all_masks(img_arr, [moe_mask]) if moe_mask.any() else img_arr,
-         f"CAPR MoE soft blend\ncgF1={moe_r['cgf1']:.3f}  IoU={moe_r['iou']:.3f}", "#9c27b0"),
+         f"ALSR MoE soft blend\ncgF1={moe_r['cgf1']:.3f}  IoU={moe_r['iou']:.3f}", "#9c27b0"),
         (overlay_all_masks(img_arr, [hard_mask]) if hard_mask.any() else img_arr,
-         f"CAPR hard ({layer_label(hard_r['layer'])})\ncgF1={hard_r['cgf1']:.3f}  IoU={hard_r['iou']:.3f}", "#2196f3"),
+         f"ALSR hard ({layer_label(hard_r['layer'])})\ncgF1={hard_r['cgf1']:.3f}  IoU={hard_r['iou']:.3f}", "#2196f3"),
     ]
 
     fig, axes = plt.subplots(1, 5, figsize=(27, 5))
@@ -190,7 +190,7 @@ def save_comparison(image, results, gt_mask, best_idx, moe_r, hard_r, path):
         ax.set_title(title, fontsize=9, color="white", pad=5,
                      bbox=dict(boxstyle="round,pad=0.3", fc=bg, alpha=0.75, ec="none"))
 
-    fig.suptitle(f'"{PROMPT}" — GT | SAM3 default | Oracle best | CAPR MoE | CAPR hard',
+    fig.suptitle(f'"{PROMPT}" — GT | SAM3 default | Oracle best | ALSR MoE | ALSR hard',
                  fontsize=12, fontweight="bold", color="white", y=1.02)
     plt.tight_layout(pad=0.5)
     fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="#111111")
